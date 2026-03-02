@@ -1,0 +1,95 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /**
+     * SETU Application Security Rules
+     *
+     * Core Philosophy: 
+     * This ruleset enforces a strict user-ownership model. Every piece of data is partitioned 
+     * by the user's unique identity (UID). This ensures that users can only access their 
+     * own profile and conversation history, preventing unauthorized cross-user data access.
+     *
+     * Data Structure: 
+     * All data follows a hierarchical organization starting at the root /users/{userId} 
+     * collection. Conversations are nested as a subcollection under the specific user 
+     * who owns them: /users/{userId}/conversations/{conversationId}.
+     *
+     * Key Security Decisions:
+     * 1. Strict Ownership: Access is restricted to the authenticated user matching the 
+     *    document path. No public read or write access is permitted.
+     * 2. Authorization Independence: Every document contains an internal reference 
+     *    (e.g., userId) to its owner. Rules validate that this internal field matches 
+     *    the document path and the user's auth token.
+     * 3. Prototyping Flexibility: While authorization is strictly enforced, the 
+     *    schema of message content and metadata is not validated here to allow for 
+     *    rapid iteration of AI-driven features (emotion detection, reframing).
+     * 4. Relational Integrity: On creation and update, rules ensure that the 
+     *    link between a document and its owner (the userId field) is established 
+     *    correctly and remains immutable.
+     */
+
+    // --- Helper Functions ---
+
+    /** @description Checks if the request is from a signed-in user. */
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    /** @description Checks if the user's UID matches the provided userId. */
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    /** @description Checks if the user owns the existing document and it actually exists. */
+    function isExistingOwner(userId) {
+      return resource != null && isOwner(userId);
+    }
+
+    // --- Collection Rules ---
+
+    /**
+     * @description Rules for user profile documents. Allows users to create and manage their own profiles.
+     * @path /users/{userId}
+     * @allow (create) if auth.uid is 'user_123' and request.resource.data.id is 'user_123'
+     * @deny (read) if auth.uid is 'user_456' but path is '/users/user_123'
+     * @principle Ownership and Self-Creation: Users manage their own identity documents.
+     */
+    match /users/{userId} {
+      allow get, list: if isOwner(userId);
+      
+      allow create: if isOwner(userId) 
+                    && request.resource.data.id == userId;
+      
+      allow update: if isExistingOwner(userId) 
+                    && request.resource.data.id == resource.data.id;
+      
+      allow delete: if isExistingOwner(userId);
+
+      /**
+       * @description Rules for user-specific conversations. Nested under the user to ensure path-based security.
+       * @path /users/{userId}/conversations/{conversationId}
+       * @allow (list) if auth.uid is 'user_123' and path starts with '/users/user_123'
+       * @deny (update) if trying to change the 'userId' field to a different user.
+       * @principle Authorization Independence: Validates internal owner IDs against path parameters.
+       */
+      match /conversations/{conversationId} {
+        allow get, list: if isOwner(userId);
+        
+        allow create: if isOwner(userId) 
+                      && request.resource.data.userId == userId;
+        
+        allow update: if isExistingOwner(userId) 
+                      && request.resource.data.userId == resource.data.userId;
+        
+        allow delete: if isExistingOwner(userId);
+      }
+    }
+
+    // --- Default Deny ---
+    // Explicitly deny any access to paths not defined above.
+    match /{path=**} {
+      allow read, write: if false;
+    }
+  }
+}
